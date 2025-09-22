@@ -17,6 +17,7 @@ package otelhttp
 import (
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/felixge/httpsnoop"
@@ -181,7 +182,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setAfterServeAttributes(span, bw.read, rww.written, rww.statusCode, bw.err, rww.err)
 
 	// Add metrics
-	attributes := append(labeler.Get(), semconv.HTTPServerMetricAttributesFromHTTPRequest(h.operation, r)...)
+	attributes := append(labeler.Get(), safeHTTPServerMetricAttributesFromHTTPRequest(h.operation, r)...)
 	h.counters[RequestContentLength].Add(ctx, bw.read, attributes...)
 	h.counters[ResponseContentLength].Add(ctx, rww.written, attributes...)
 
@@ -222,4 +223,31 @@ func WithRouteTag(route string, h http.Handler) http.Handler {
 		span.SetAttributes(semconv.HTTPRouteKey.String(route))
 		h.ServeHTTP(w, r)
 	})
+}
+
+// safeHTTPServerMetricAttributesFromHTTPRequest returns sanitized metric attributes for an HTTP request received by a server.
+// This function is similar to semconv.HTTPServerMetricAttributesFromHTTPRequest but sanitizes the HTTP method
+// to prevent unbounded cardinality and potential DoS attacks.
+func safeHTTPServerMetricAttributesFromHTTPRequest(operation string, r *http.Request) []attribute.KeyValue {
+	// Get the original attributes
+	attrs := semconv.HTTPServerMetricAttributesFromHTTPRequest(operation, r)
+
+	// Find and replace http.method with the safe version if it exists
+	for i, attr := range attrs {
+		if attr.Key == semconv.HTTPMethodKey {
+			// Sanitize the HTTP method to prevent unbounded cardinality
+			method := strings.ToUpper(attr.Value.AsString())
+			switch method {
+			case http.MethodConnect, http.MethodDelete, http.MethodGet, http.MethodHead,
+				 http.MethodOptions, http.MethodPatch, http.MethodPost, http.MethodPut, http.MethodTrace:
+				// Standard methods are allowed
+			default:
+				// Non-standard methods are normalized to "_OTHER"
+				attrs[i] = semconv.HTTPMethodKey.String("_OTHER")
+			}
+			break
+		}
+	}
+
+	return attrs
 }
